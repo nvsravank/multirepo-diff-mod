@@ -1,0 +1,8 @@
+{
+  "name": "multirepo-diff-mod",
+  "version": "0.1.0",
+  "description": "/multi-diff: browse uncommitted changes across every git repo in your workspace folder",
+  "author": { "name": "Sravan" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
