@@ -1,8 +1,12 @@
 {
   "name": "multirepo-diff-mod",
-  "version": "0.1.0",
-  "description": "/multi-diff: browse uncommitted changes across every git repo in your workspace folder",
-  "author": { "name": "Sravan" },
+  "displayName": "Multi-repo Diff",
+  "version": "0.2.0",
+  "description": "/multi-diff: a worktree-aware diff viewer for every git repo in your project folder, with uncommitted, staged, pull request and since-this-session views",
+  "author": { "name": "Sravan", "url": "https://github.com/nvsravank" },
+  "homepage": "https://github.com/nvsravank/multirepo-diff-mod",
+  "repository": "https://github.com/nvsravank/multirepo-diff-mod",
   "license": "MIT",
+  "keywords": ["diff", "git", "worktree", "multi-repo", "pull-request", "code-review"],
   "types": "./types/index.d.ts"
 }
