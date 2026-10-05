@@ -14,8 +14,14 @@ one pane.
   - **Staged vs HEAD**
   - **Branch vs base (PR)**: the branch's commits since it left `origin/main`
     (or the repo's default branch)
-  - **This Claude session**: files Claude edited in this session, against their
-    content before its first edit
+  - **Changes since this session started**: every change since the
+    conversation began, made by Claude or anyone, by any tool (edits, scripts,
+    shell commands). When a session starts, the mod takes a git snapshot of
+    each repo and worktree in the folder; a resumed conversation keeps its
+    snapshot, while `/clear` or a new conversation starts a new one. The
+    snapshots live in each repo's `.git` under `refs/multirepo-diff/` and are
+    removed after 30 days. Your files, branches and staged changes are never
+    touched.
 - Changed files show as a tree on the left (☰ hides it), and the selected
   file's diff is on the right. ⟳ rescans, and ☀/☾ switches the diff's colors.
 

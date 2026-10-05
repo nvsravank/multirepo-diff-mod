@@ -237,3 +237,16 @@ export function parseWorktrees(out: string): Worktree[] {
     })
     .filter((one): one is Worktree => one !== null)
 }
+
+/**
+ * A short, stable name for a folder (8 hex characters, FNV-1a of the path as
+ * samePath compares it), so each checkout of a repo gets its own snapshot ref.
+ */
+export function pathKey(path: string) {
+  let hash = 0x811c9dc5
+  for (const char of comparable(path)) {
+    hash ^= char.codePointAt(0) ?? 0
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}

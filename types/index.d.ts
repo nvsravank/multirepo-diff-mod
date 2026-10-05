@@ -10,8 +10,8 @@ export type FileChange = {
   from?: string
   /** Two-letter status, e.g. ` M`, `A `, `??`. */
   status: string
-  /** Session mode: the file's content before Claude's first edit (a snapshot path, or /dev/null). */
-  before?: string
+  /** Session mode: the snapshot tree from the session's start, and the tree of the files now. */
+  trees?: { base: string; now: string }
 }
 
 /**
@@ -20,12 +20,9 @@ export type FileChange = {
  * - unstaged: working tree against the staging area
  * - staged: staging area against the last commit
  * - base: the branch's commits against where it left the default branch (a PR's view)
- * - session: files Claude edited in this session, against their content before the first edit
+ * - session: every change since this session started (by Claude or anyone), against a git snapshot taken then
  */
 export type DiffMode = 'head' | 'unstaged' | 'staged' | 'base' | 'session'
-
-/** A file Claude edited this session: its absolute path and its content before the first edit. */
-export type SessionEdit = { path: string; before: string }
 
 export type Theme = 'light' | 'dark'
 
@@ -57,7 +54,6 @@ declare module 'claude-code' {
       diffPage: number
       /** Which page of TREE_ROWS file-tree rows is shown, from 0. */
       treePage: number
-      sessionEdits: SessionEdit[]
       /** True while the file list is folded away. */
       isListCollapsed: boolean
       /** Folders folded in the file tree, by path. */
