@@ -380,19 +380,16 @@ const SESSION_START_GRACE_MS = 2 * 60 * 1000
 // Writing a tree of a big checkout can take a while.
 const WRITE_TREE_TIMEOUT_MS = 120_000
 
-/** The system's temp folder (TMPDIR on macOS and Linux, TEMP or TMP on Windows, else /tmp). */
-async function tempDir($: $) {
-  const temp = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
-  const dir = join(temp, 'multirepo-diff-mod')
-  // git won't create the folder for its index file; writing a file here does.
-  if (!(await $.fs.exists(dir))) await $.fs.write(join(dir, '.keep'), '')
-  return dir
-}
-
-/** Writes the checkout's files as they are now into git's store; returns the tree id. */
+/**
+ * Writes the checkout's files as they are now into git's store; returns the
+ * tree id. It uses a throwaway index file inside the checkout's own git folder
+ * (git rev-parse --git-path gives it, worktrees included), seeded from HEAD so
+ * git only hashes what changed. The real index is never touched.
+ */
 async function writeTree($: $, cwd: string) {
-  // A throwaway index per checkout; seeding it from HEAD means git only hashes what changed.
-  const env = { GIT_INDEX_FILE: join(await tempDir($), `index-${pathKey(cwd)}`) }
+  const indexPath = await git($, cwd, ['rev-parse', '--path-format=absolute', '--git-path', 'multirepo-diff-index'])
+  if (indexPath.exitCode !== 0) throw new Error(indexPath.stderr.trim() || 'git rev-parse failed')
+  const env = { GIT_INDEX_FILE: indexPath.stdout.trim() }
   await git($, cwd, ['read-tree', 'HEAD'], env) // fails harmlessly in a repo with no commits
   const added = await git($, cwd, ['add', '-A'], env, WRITE_TREE_TIMEOUT_MS)
   if (added.exitCode !== 0) throw new Error(added.stderr.trim() || 'git add failed')
