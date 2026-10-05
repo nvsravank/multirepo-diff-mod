@@ -38,6 +38,29 @@ Or add the folder to `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of
 `~/.claude/settings.json`. Sessions started by the desktop app will then load it,
 and it hot-reloads when you edit it.
 
+## What it runs and changes
+
+The mod makes no network requests and sends no data anywhere. On your machine
+it does the following:
+
+- **Runs `git`** in the folder you open and in the repos and worktrees inside
+  it, to list repos, worktrees and changed files and to produce diffs.
+- **Reads the folder listing** of the folder you open, one level deep, to find
+  repos.
+- **Writes session snapshots into each repo's `.git` folder.** When a session
+  starts, it stores a snapshot of the repo's files (a git tree) and a ref under
+  `refs/multirepo-diff/` that points to it. It deletes its own refs after 30
+  days. It never commits, changes branches, edits your files or touches your
+  staging area.
+- **Writes a temporary git index file** per checkout in your system's temp
+  folder (`TMPDIR`, `TEMP` or `TMP`), under `multirepo-diff-mod/`, to build those
+  snapshots.
+- **Remembers your light/dark choice** in Claude Code's plugin storage.
+
+To remove the snapshots from a repo, run
+`git for-each-ref --format='%(refname)' refs/multirepo-diff/ | xargs -n1 git update-ref -d`
+in it.
+
 ## Platforms
 
 Tested on macOS, in the terminal and the Desktop app. It is written to work on
