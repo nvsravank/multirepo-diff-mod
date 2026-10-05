@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { DiffMode, DiffView, FileChange, Repo, SessionEdit, Theme, Worktree } from '../types'
 import { toRows } from './diff'
-import { DIFF, baseName, join, parseNameStatus, parseStatus, parseWorktrees, toBlocks, toTree, toView, untracked } from './parse'
+import { DIFF, baseName, isAbsolute, isInside, join, parseNameStatus, parseStatus, parseWorktrees, toBlocks, relativeTo, safeName, samePath, toSlash, toTree, toView, untracked } from './parse'
 
 const PANE = 'multi-diff'
 const COMMAND = 'multi-diff'
@@ -51,13 +51,13 @@ function git($: $, cwd: string, args: string[]) {
 
 async function isRepoRoot($: $, dir: string) {
   const r = await git($, dir, ['rev-parse', '--show-toplevel'])
-  return r.exitCode === 0 && r.stdout.trim().replace(/\/+$/, '') === dir.replace(/\/+$/, '')
+  return r.exitCode === 0 && samePath(r.stdout.trim(), dir)
 }
 
 /** The main checkout a repo or linked worktree belongs to (its common .git's folder). */
 async function mainCheckout($: $, path: string) {
   const r = await git($, path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.stdout.trim().replace(/\/+$/, '')
+  const common = toSlash(r.stdout.trim())
   return r.exitCode === 0 && common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : path
 }
 
@@ -81,8 +81,7 @@ async function discover($: $, dir: string): Promise<Repo[]> {
   })
 
   const mains = await Promise.all(candidates.map(one => mainCheckout($, one.path)))
-  const paths = new Set(candidates.map(one => one.path))
-  return candidates.filter((one, i) => mains[i] === one.path || !paths.has(mains[i]))
+  return candidates.filter((one, i) => samePath(mains[i], one.path) || !candidates.some(other => samePath(other.path, mains[i])))
 }
 
 /** Every worktree of the repo, its main checkout first. */
@@ -183,13 +182,12 @@ async function listChanges(
   }
 
   // session
-  const prefix = cwd.replace(/\/+$/, '') + '/'
   const files: FileChange[] = []
   for (const edit of sessionEdits) {
-    if (!edit.path.startsWith(prefix)) continue
+    if (!isInside(edit.path, cwd)) continue
     const exists = await $.fs.exists(edit.path)
     const isNew = edit.before === '/dev/null'
-    files.push({ path: edit.path.slice(prefix.length), status: isNew ? 'A ' : exists ? 'M ' : 'D ', before: edit.before })
+    files.push({ path: relativeTo(edit.path, cwd), status: isNew ? 'A ' : exists ? 'M ' : 'D ', before: edit.before })
   }
   return { files, note }
 }
@@ -269,7 +267,8 @@ async function showTree($: $, wanted: string) {
   if (repoPath) {
     const trees = await listWorktrees($, repoPath)
     await update($, worktrees, () => trees)
-    if (!trees.some(one => one.path === path)) path = trees[0].path
+    // Use git's own spelling of the path, so it matches the picker's options.
+    path = (trees.find(one => samePath(one.path, path)) ?? trees[0]).path
   }
   await update($, worktree, () => path)
   const [current, edits] = await Promise.all([read($, mode), read($, sessionEdits)])
@@ -298,7 +297,8 @@ async function selectRepo($: $, repoPath: string, keep?: string) {
   await update($, repo, () => repoPath)
   const trees = await listWorktrees($, repoPath)
   await update($, worktrees, () => trees)
-  await showTree($, keep && trees.some(one => one.path === keep) ? keep : trees[0].path)
+  const kept = keep ? trees.find(one => samePath(one.path, keep)) : undefined
+  await showTree($, (kept ?? trees[0]).path)
 }
 
 async function setMode($: $, next: DiffMode) {
@@ -310,7 +310,7 @@ async function setMode($: $, next: DiffMode) {
 }
 
 async function refresh($: $, dir?: string) {
-  const where = dir || (await read($, root)) || (await $.session.cwd())
+  const where = toSlash(dir || (await read($, root)) || (await $.session.cwd()))
   await update($, root, () => where)
   try {
     // A broken git (e.g. macOS's Xcode stub before its license is accepted)
@@ -330,7 +330,7 @@ async function refresh($: $, dir?: string) {
       return
     }
     const [current, tree] = await Promise.all([read($, repo), read($, worktree)])
-    await selectRepo($, found.some(one => one.path === current) ? current : found[0].path, tree)
+    await selectRepo($, (found.find(one => samePath(one.path, current)) ?? found[0]).path, tree)
   } catch (err) {
     await update($, error, () => String(err))
   }
@@ -346,7 +346,7 @@ async function toggleDetached($: $) {
   const isShowing = await update($, showDetached, shown => !shown)
   if (isShowing) return
   const [trees, current] = await Promise.all([read($, worktrees), read($, worktree)])
-  const viewed = trees.find((one, i) => i > 0 && one.path === current)
+  const viewed = trees.find((one, i) => i > 0 && samePath(one.path, current))
   if (viewed && !viewed.branch) await showTree($, trees[0].path)
 }
 
@@ -363,19 +363,28 @@ async function toggleDir($: $, path: string) {
  * so session mode can diff against it. A file that does not exist yet is
  * recorded as new (/dev/null).
  */
+/**
+ * Where this session's snapshots go: the system's temp folder (TMPDIR on
+ * macOS and Linux, TEMP or TMP on Windows, else /tmp), one folder per session.
+ */
+async function snapshotDir($: $) {
+  const temp = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
+  return join(join(temp, 'multirepo-diff-mod'), safeName(await $.session.id()))
+}
+
 async function snapshot($: $, path: string) {
   const edits = await read($, sessionEdits)
-  if (edits.some(one => one.path === path)) return
+  if (edits.some(one => samePath(one.path, path))) return
   let before = '/dev/null'
   if (await $.fs.exists(path)) {
     const stat = await $.fs.stat(path)
     if (stat.size > MAX_SNAPSHOT_BYTES) return
-    const copy = `/tmp/multirepo-diff-mod/${await $.session.id()}/${edits.length}-${baseName(path)}`
+    const copy = join(await snapshotDir($), `${edits.length}-${safeName(baseName(path))}`)
     await $.fs.write(copy, await $.fs.read(path))
     before = copy
   }
   const edit: SessionEdit = { path, before }
-  await update($, sessionEdits, list => (list.some(one => one.path === path) ? list : [...list, edit]))
+  await update($, sessionEdits, list => (list.some(one => samePath(one.path, path)) ? list : [...list, edit]))
 }
 
 /**
@@ -386,7 +395,7 @@ async function trackEdit($: $, e: object, next: (e: never) => Promise<unknown>) 
   const input = e as { file_path?: unknown; notebook_path?: unknown }
   const raw = input.file_path ?? input.notebook_path
   if (typeof raw === 'string' && raw) {
-    const path = raw.startsWith('/') ? raw : join(await $.session.cwd(), raw)
+    const path = toSlash(isAbsolute(raw) ? raw : join(await $.session.cwd(), raw))
     await snapshot($, path).catch(() => undefined)
   }
   const result = await next(e as never)
@@ -495,7 +504,7 @@ export const register: Register = on => {
   // `/multi-diff` scans the session's folder; `/multi-diff <dir>` scans another.
   on('command.run', { command: COMMAND }, async ($, e) => {
     const arg = e.args.trim()
-    const target = arg.startsWith('/') ? arg : arg ? join(await $.session.cwd(), arg) : await $.session.cwd()
+    const target = toSlash(isAbsolute(arg) ? arg : arg ? join(await $.session.cwd(), arg) : await $.session.cwd())
     await refresh($, target)
     await $.ui.open({ id: PANE, title: 'Multi-repo diff', focus: true })
     const found = await read($, repos)

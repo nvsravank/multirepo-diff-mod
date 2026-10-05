@@ -32,6 +32,13 @@ Or add the folder to `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of
 `~/.claude/settings.json`. Sessions started by the desktop app will then load it,
 and it hot-reloads when you edit it.
 
+## Platforms
+
+Tested on macOS, in the terminal and the Desktop app. It is written to work on
+Linux and Windows too, but it has not been tested on Windows yet. If you try it
+there, please [open an issue](https://github.com/nvsravank/multirepo-diff-mod/issues/new/choose)
+whether it works or not.
+
 ## Feedback
 
 Bug reports and feature requests are welcome as
