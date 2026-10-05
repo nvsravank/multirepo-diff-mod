@@ -1,6 +1,22 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { parseNameStatus, parseStatus, parseWorktrees, toBlocks, toTree, toView, untracked } from '../hooks/parse'
+import {
+  baseName,
+  isAbsolute,
+  isInside,
+  join,
+  parseNameStatus,
+  parseStatus,
+  parseWorktrees,
+  relativeTo,
+  safeName,
+  samePath,
+  toBlocks,
+  toSlash,
+  toTree,
+  toView,
+  untracked,
+} from '../hooks/parse'
 
 describe('git output', () => {
   test('status: modified, untracked, rename with its original path, spaces in names', () => {
@@ -131,5 +147,53 @@ describe('file tree', () => {
     const rows = toTree(files, new Set(['hooks']))
     expect(rows.map(row => row.name)).toEqual(['hooks', 'types', 'index.d.ts', 'z.ts'])
     expect(rows[0].kind === 'dir' && rows[0].isCollapsed).toBe(true)
+  })
+})
+
+describe('paths on macOS, Linux and Windows', () => {
+  test('backslashes become forward slashes; trailing slashes go, roots stay', () => {
+    expect(toSlash('C:\\Users\\me\\code\\')).toBe('C:/Users/me/code')
+    expect(toSlash('/Users/me/code/')).toBe('/Users/me/code')
+    expect(toSlash('/')).toBe('/')
+    expect(toSlash('C:\\')).toBe('C:/')
+  })
+
+  test('the same place matches across separators, and across case on Windows only', () => {
+    expect(samePath('C:\\Users\\Me\\code', 'c:/users/me/code/')).toBe(true)
+    expect(samePath('/Users/Me/code', '/Users/me/code')).toBe(false)
+    expect(samePath('/repo', '/repo/')).toBe(true)
+  })
+
+  test('inside a folder, and the path relative to it', () => {
+    expect(isInside('C:/Code/App/src/a.ts', 'c:\\code\\app')).toBe(true)
+    expect(isInside('/repo-other/a.ts', '/repo')).toBe(false)
+    expect(isInside('/repo', '/repo')).toBe(false)
+    expect(relativeTo('C:\\code\\app\\src\\a.ts', 'C:/code/app')).toBe('src/a.ts')
+  })
+
+  test('absolute paths on either system', () => {
+    expect(isAbsolute('/Users/me')).toBe(true)
+    expect(isAbsolute('C:\\Users\\me')).toBe(true)
+    expect(isAbsolute('d:/work')).toBe(true)
+    expect(isAbsolute('src/a.ts')).toBe(false)
+  })
+
+  test('join and baseName handle Windows folders', () => {
+    expect(join('C:\\code', 'app')).toBe('C:/code/app')
+    expect(join('C:/', 'app')).toBe('C:/app')
+    expect(baseName('C:\\code\\app\\register.tsx')).toBe('register.tsx')
+  })
+
+  test('snapshot names drop characters Windows forbids', () => {
+    expect(safeName('a<b>c:d"e|f?g*h.ts')).toBe('a_b_c_d_e_f_g_h.ts')
+    expect(safeName('3-register.tsx')).toBe('3-register.tsx')
+  })
+
+  test('worktree output with Windows paths and CRLF line endings', () => {
+    const out = 'worktree C:/code/app\r\nHEAD 1310f3a0123\r\nbranch refs/heads/main\r\n\r\nworktree C:/code/app/.claude/worktrees/x\r\nHEAD 550368d0123\r\ndetached\r\n'
+    expect(parseWorktrees(out)).toEqual([
+      { path: 'C:/code/app', sha: '1310f3a', branch: 'main' },
+      { path: 'C:/code/app/.claude/worktrees/x', sha: '550368d', branch: null },
+    ])
   })
 })

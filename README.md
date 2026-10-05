@@ -14,8 +14,14 @@ one pane.
   - **Staged vs HEAD**
   - **Branch vs base (PR)**: the branch's commits since it left `origin/main`
     (or the repo's default branch)
-  - **This Claude session**: files Claude edited in this session, against their
-    content before its first edit
+  - **Changes since this session started**: every change since the
+    conversation began, made by Claude or anyone, by any tool (edits, scripts,
+    shell commands). When a session starts, the mod takes a git snapshot of
+    each repo and worktree in the folder; a resumed conversation keeps its
+    snapshot, while `/clear` or a new conversation starts a new one. The
+    snapshots live in each repo's `.git` under `refs/multirepo-diff/` and are
+    removed after 30 days. Your files, branches and staged changes are never
+    touched.
 - Changed files show as a tree on the left (☰ hides it), and the selected
   file's diff is on the right. ⟳ rescans, and ☀/☾ switches the diff's colors.
 
@@ -31,6 +37,13 @@ claude --plugin-dir /path/to/multirepo-diff-mod
 Or add the folder to `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of
 `~/.claude/settings.json`. Sessions started by the desktop app will then load it,
 and it hot-reloads when you edit it.
+
+## Platforms
+
+Tested on macOS, in the terminal and the Desktop app. It is written to work on
+Linux and Windows too, but it has not been tested on Windows yet. If you try it
+there, please [open an issue](https://github.com/nvsravank/multirepo-diff-mod/issues/new/choose)
+whether it works or not.
 
 ## Feedback
 

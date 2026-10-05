@@ -10,8 +10,39 @@ const MAX_DIFF_CHARS = 400000
 
 export const DIFF = ['diff', '--no-color', '--no-ext-diff', '-M']
 
-export const join = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : `${dir}/${name}`)
-export const baseName = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
+// --- paths -----------------------------------------------------------------
+// Paths are kept with forward slashes everywhere. Claude Code reports Windows
+// folders as C:\Users\…, git as C:/Users/…, and Windows ignores case, so paths
+// are normalized on the way in and compared with samePath / isInside.
+
+/** Forward slashes, no trailing slash (a bare root like `/` or `C:/` keeps it). */
+export const toSlash = (p: string) => p.replace(/\\/g, '/').replace(/(?<!^|:)\/+$/, '')
+
+/** A Windows drive path such as `C:/x` or `c:\x`. */
+export const isWindowsPath = (p: string) => /^[A-Za-z]:[\\/]/.test(p)
+
+/** An absolute path on either system. */
+export const isAbsolute = (p: string) => p.startsWith('/') || p.startsWith('\\') || isWindowsPath(p)
+
+const comparable = (p: string) => (isWindowsPath(p) ? toSlash(p).toLowerCase() : toSlash(p))
+
+/** Whether two paths name the same place: separators ignored, case too on Windows. */
+export const samePath = (a: string, b: string) => comparable(a) === comparable(b)
+
+/** Whether `path` is inside `dir` (not `dir` itself). */
+export const isInside = (path: string, dir: string) => comparable(path).startsWith(`${comparable(dir)}/`)
+
+/** `path` relative to `dir`, assuming isInside(path, dir). */
+export const relativeTo = (path: string, dir: string) => toSlash(path).slice(toSlash(dir).length + 1)
+
+export const join = (dir: string, name: string) => {
+  const base = toSlash(dir)
+  return base.endsWith('/') ? base + name : `${base}/${name}`
+}
+export const baseName = (p: string) => toSlash(p).split('/').pop() || p
+
+/** A file name safe on every system: Windows forbids <>:"/\|?* and control characters. */
+export const safeName = (name: string) => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
 
 export function parseStatus(out: string): FileChange[] {
   const parts = out.split('\0')
@@ -195,13 +226,27 @@ function splitHunk(hunk: string): string[] {
 /** `git worktree list --porcelain`: blocks of `worktree <path>`, `HEAD <sha>`, `branch <ref>` or `detached`. */
 export function parseWorktrees(out: string): Worktree[] {
   return out
-    .split('\n\n')
+    .split(/\r?\n\r?\n/)
     .map(block => {
-      const lines = block.split('\n')
+      const lines = block.split(/\r?\n/)
       const value = (key: string) => lines.find(line => line.startsWith(`${key} `))?.slice(key.length + 1)
-      const path = value('worktree')
+      const raw = value('worktree')
+      const path = raw ? toSlash(raw) : undefined
       const ref = value('branch')
       return path ? { path, sha: (value('HEAD') ?? '').slice(0, 7), branch: ref ? ref.replace(/^refs\/heads\//, '') : null } : null
     })
     .filter((one): one is Worktree => one !== null)
+}
+
+/**
+ * A short, stable name for a folder (8 hex characters, FNV-1a of the path as
+ * samePath compares it), so each checkout of a repo gets its own snapshot ref.
+ */
+export function pathKey(path: string) {
+  let hash = 0x811c9dc5
+  for (const char of comparable(path)) {
+    hash ^= char.codePointAt(0) ?? 0
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
 }

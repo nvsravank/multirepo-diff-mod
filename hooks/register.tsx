@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { DiffMode, DiffView, FileChange, Repo, SessionEdit, Theme, Worktree } from '../types'
+import type { DiffMode, DiffView, FileChange, Repo, Theme, Worktree } from '../types'
 import { toRows } from './diff'
-import { DIFF, baseName, join, parseNameStatus, parseStatus, parseWorktrees, toBlocks, toTree, toView, untracked } from './parse'
+import { DIFF, baseName, isAbsolute, join, parseNameStatus, parseStatus, parseWorktrees, pathKey, toBlocks, samePath, toSlash, toTree, toView, untracked } from './parse'
 
 const PANE = 'multi-diff'
 const COMMAND = 'multi-diff'
@@ -20,7 +20,6 @@ const files = atom({ plugin: 'multirepo-diff-mod', key: 'files' } as const, [])
 const file = atom({ plugin: 'multirepo-diff-mod', key: 'file' } as const, '')
 const diff = atom({ plugin: 'multirepo-diff-mod', key: 'diff' } as const, { kind: 'empty' })
 const error = atom({ plugin: 'multirepo-diff-mod', key: 'error' } as const, '')
-const sessionEdits = atom({ plugin: 'multirepo-diff-mod', key: 'sessionEdits' } as const, [])
 const isListCollapsed = atom({ plugin: 'multirepo-diff-mod', key: 'isListCollapsed' } as const, false)
 const collapsedDirs = atom({ plugin: 'multirepo-diff-mod', key: 'collapsedDirs' } as const, [])
 const theme = atom({ plugin: 'multirepo-diff-mod', key: 'theme' } as const, 'light')
@@ -36,28 +35,25 @@ const MODES: readonly { value: DiffMode; label: string; empty: string }[] = [
   { value: 'unstaged', label: 'Unstaged vs staged', empty: 'No unstaged changes' },
   { value: 'staged', label: 'Staged vs HEAD', empty: 'Nothing is staged' },
   { value: 'base', label: 'Branch vs base (PR)', empty: 'No commits ahead of the base' },
-  { value: 'session', label: 'This Claude session', empty: 'Claude has not edited files here this session' },
+  { value: 'session', label: 'Changes since this session started', empty: 'No changes since this session started' },
 ]
 
-// Files bigger than this are not snapshotted for session mode.
-const MAX_SNAPSHOT_BYTES = 2_000_000
 
-
-function git($: $, cwd: string, args: string[]) {
-  return $.process.run(['git', '--no-pager', ...args], { cwd, timeoutMs: 20000 })
+function git($: $, cwd: string, args: string[], env?: Record<string, string>, timeoutMs = 20000) {
+  return $.process.run(['git', '--no-pager', ...args], { cwd, env, timeoutMs })
 }
 
 // --- discovery -------------------------------------------------------------
 
 async function isRepoRoot($: $, dir: string) {
   const r = await git($, dir, ['rev-parse', '--show-toplevel'])
-  return r.exitCode === 0 && r.stdout.trim().replace(/\/+$/, '') === dir.replace(/\/+$/, '')
+  return r.exitCode === 0 && samePath(r.stdout.trim(), dir)
 }
 
 /** The main checkout a repo or linked worktree belongs to (its common .git's folder). */
 async function mainCheckout($: $, path: string) {
   const r = await git($, path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const common = r.stdout.trim().replace(/\/+$/, '')
+  const common = toSlash(r.stdout.trim())
   return r.exitCode === 0 && common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : path
 }
 
@@ -81,8 +77,7 @@ async function discover($: $, dir: string): Promise<Repo[]> {
   })
 
   const mains = await Promise.all(candidates.map(one => mainCheckout($, one.path)))
-  const paths = new Set(candidates.map(one => one.path))
-  return candidates.filter((one, i) => mains[i] === one.path || !paths.has(mains[i]))
+  return candidates.filter((one, i) => samePath(mains[i], one.path) || !candidates.some(other => samePath(other.path, mains[i])))
 }
 
 /** Every worktree of the repo, its main checkout first. */
@@ -132,7 +127,6 @@ async function listChanges(
   $: $,
   cwd: string,
   mode: DiffMode,
-  sessionEdits: readonly SessionEdit[],
 ): Promise<Listing> {
   // The comparison line (row 4): what is compared with what, on which branch.
   const head = await headLabel($, cwd)
@@ -142,7 +136,7 @@ async function listChanges(
     unstaged: `${head.name}: working tree vs staging area`,
     staged: `${head.name}: staging area vs HEAD${at}`,
     base: '',
-    session: `${head.name}: files Claude edited this session vs before its first edit (shell-command edits are not tracked)`,
+    session: '',
   }[mode]
   const fail = (r: { stderr: string }, what: string): Listing => ({
     files: [],
@@ -182,16 +176,16 @@ async function listChanges(
     }
   }
 
-  // session
-  const prefix = cwd.replace(/\/+$/, '') + '/'
-  const files: FileChange[] = []
-  for (const edit of sessionEdits) {
-    if (!edit.path.startsWith(prefix)) continue
-    const exists = await $.fs.exists(edit.path)
-    const isNew = edit.before === '/dev/null'
-    files.push({ path: edit.path.slice(prefix.length), status: isNew ? 'A ' : exists ? 'M ' : 'D ', before: edit.before })
+  // session: the snapshot from the session's start vs the files now
+  const base = await baseline($, cwd)
+  const now = await writeTree($, cwd)
+  const r = await git($, cwd, ['diff', '--name-status', '-z', '-M', base.tree, now])
+  if (r.exitCode !== 0) return fail(r, 'git diff')
+  const since = base.isLate ? 'when this pane first saw this checkout' : 'this session started'
+  return {
+    files: parseNameStatus(r.stdout).map(one => ({ ...one, trees: { base: base.tree, now } })),
+    note: `${head.name}: every change since ${since}, by Claude or anyone (snapshot ${base.tree.slice(0, 7)})`,
   }
-  return { files, note }
 }
 
 // --- one file's diff -------------------------------------------------------
@@ -199,15 +193,13 @@ async function listChanges(
 async function fileDiff($: $, cwd: string, mode: DiffMode, change: FileChange): Promise<DiffView> {
   const paths = change.from ? ['--', change.from, change.path] : ['--', change.path]
 
-  if (change.status === '??') {
-    const r = await git($, cwd, [...DIFF, '--no-index', '--', '/dev/null', change.path])
+  if (mode === 'session' && change.trees) {
+    const r = await git($, cwd, [...DIFF, change.trees.base, change.trees.now, ...paths])
     return toView(r.stdout)
   }
 
-  if (mode === 'session') {
-    const current = join(cwd, change.path)
-    const after = (await $.fs.exists(current)) ? current : '/dev/null'
-    const r = await git($, cwd, [...DIFF, '--no-index', '--', change.before ?? '/dev/null', after])
+  if (change.status === '??') {
+    const r = await git($, cwd, [...DIFF, '--no-index', '--', '/dev/null', change.path])
     return toView(r.stdout)
   }
 
@@ -269,11 +261,17 @@ async function showTree($: $, wanted: string) {
   if (repoPath) {
     const trees = await listWorktrees($, repoPath)
     await update($, worktrees, () => trees)
-    if (!trees.some(one => one.path === path)) path = trees[0].path
+    // Use git's own spelling of the path, so it matches the picker's options.
+    path = (trees.find(one => samePath(one.path, path)) ?? trees[0]).path
   }
   await update($, worktree, () => path)
-  const [current, edits] = await Promise.all([read($, mode), read($, sessionEdits)])
-  const listing = await listChanges($, path, current, edits)
+  const current = await read($, mode)
+  let listing: Listing
+  try {
+    listing = await listChanges($, path, current)
+  } catch (err) {
+    listing = { files: [], note: '', error: String(err) }
+  }
   // A newer load started meanwhile: drop this stale result.
   if (ticket !== listTicket) return
   await update($, treePage, () => 0)
@@ -298,7 +296,8 @@ async function selectRepo($: $, repoPath: string, keep?: string) {
   await update($, repo, () => repoPath)
   const trees = await listWorktrees($, repoPath)
   await update($, worktrees, () => trees)
-  await showTree($, keep && trees.some(one => one.path === keep) ? keep : trees[0].path)
+  const kept = keep ? trees.find(one => samePath(one.path, keep)) : undefined
+  await showTree($, (kept ?? trees[0]).path)
 }
 
 async function setMode($: $, next: DiffMode) {
@@ -310,7 +309,7 @@ async function setMode($: $, next: DiffMode) {
 }
 
 async function refresh($: $, dir?: string) {
-  const where = dir || (await read($, root)) || (await $.session.cwd())
+  const where = toSlash(dir || (await read($, root)) || (await $.session.cwd()))
   await update($, root, () => where)
   try {
     // A broken git (e.g. macOS's Xcode stub before its license is accepted)
@@ -330,7 +329,7 @@ async function refresh($: $, dir?: string) {
       return
     }
     const [current, tree] = await Promise.all([read($, repo), read($, worktree)])
-    await selectRepo($, found.some(one => one.path === current) ? current : found[0].path, tree)
+    await selectRepo($, (found.find(one => samePath(one.path, current)) ?? found[0]).path, tree)
   } catch (err) {
     await update($, error, () => String(err))
   }
@@ -346,7 +345,7 @@ async function toggleDetached($: $) {
   const isShowing = await update($, showDetached, shown => !shown)
   if (isShowing) return
   const [trees, current] = await Promise.all([read($, worktrees), read($, worktree)])
-  const viewed = trees.find((one, i) => i > 0 && one.path === current)
+  const viewed = trees.find((one, i) => i > 0 && samePath(one.path, current))
   if (viewed && !viewed.branch) await showTree($, trees[0].path)
 }
 
@@ -358,37 +357,95 @@ async function toggleDir($: $, path: string) {
   await update($, collapsedDirs, list => (list.includes(path) ? list.filter(one => one !== path) : [...list, path]))
 }
 
-/**
- * Before Claude first edits a file this session, keep a copy of its content
- * so session mode can diff against it. A file that does not exist yet is
- * recorded as new (/dev/null).
- */
-async function snapshot($: $, path: string) {
-  const edits = await read($, sessionEdits)
-  if (edits.some(one => one.path === path)) return
-  let before = '/dev/null'
-  if (await $.fs.exists(path)) {
-    const stat = await $.fs.stat(path)
-    if (stat.size > MAX_SNAPSHOT_BYTES) return
-    const copy = `/tmp/multirepo-diff-mod/${await $.session.id()}/${edits.length}-${baseName(path)}`
-    await $.fs.write(copy, await $.fs.read(path))
-    before = copy
-  }
-  const edit: SessionEdit = { path, before }
-  await update($, sessionEdits, list => (list.some(one => one.path === path) ? list : [...list, edit]))
+// --- session snapshots -----------------------------------------------------
+//
+// "Changes since this session started" compares each checkout with a git
+// snapshot taken when the conversation began: a tree of every file (tracked,
+// plus untracked ones .gitignore doesn't exclude), written through a temporary
+// index so the real staging area, branches and files are never touched. A ref
+// under refs/multirepo-diff/ keeps git from pruning it.
+//
+// Snapshots are keyed by the session's start time, which stays the same when
+// a conversation is resumed after a restart, and starts over on /clear or in a
+// new conversation.
+
+const SNAPSHOT_REFS = 'refs/multirepo-diff'
+
+// Snapshots older than this are deleted when a new one is taken.
+const SNAPSHOT_KEEP_MS = 30 * 24 * 60 * 60 * 1000
+
+// A snapshot taken this soon after the session started counts as taken at its start.
+const SESSION_START_GRACE_MS = 2 * 60 * 1000
+
+// Writing a tree of a big checkout can take a while.
+const WRITE_TREE_TIMEOUT_MS = 120_000
+
+/** The system's temp folder (TMPDIR on macOS and Linux, TEMP or TMP on Windows, else /tmp). */
+async function tempDir($: $) {
+  const temp = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
+  const dir = join(temp, 'multirepo-diff-mod')
+  // git won't create the folder for its index file; writing a file here does.
+  if (!(await $.fs.exists(dir))) await $.fs.write(join(dir, '.keep'), '')
+  return dir
+}
+
+/** Writes the checkout's files as they are now into git's store; returns the tree id. */
+async function writeTree($: $, cwd: string) {
+  // A throwaway index per checkout; seeding it from HEAD means git only hashes what changed.
+  const env = { GIT_INDEX_FILE: join(await tempDir($), `index-${pathKey(cwd)}`) }
+  await git($, cwd, ['read-tree', 'HEAD'], env) // fails harmlessly in a repo with no commits
+  const added = await git($, cwd, ['add', '-A'], env, WRITE_TREE_TIMEOUT_MS)
+  if (added.exitCode !== 0) throw new Error(added.stderr.trim() || 'git add failed')
+  const tree = await git($, cwd, ['write-tree'], env)
+  if (tree.exitCode !== 0) throw new Error(tree.stderr.trim() || 'git write-tree failed')
+  return tree.stdout.trim()
+}
+
+/** This session's snapshot ref for a checkout. */
+async function snapshotRef($: $, cwd: string) {
+  const { startedAt } = await $.session.usage()
+  return `${SNAPSHOT_REFS}/${startedAt}/${pathKey(cwd)}`
 }
 
 /**
- * Before an edit tool runs, snapshot its file for session mode; after it
- * runs, refresh the open view so the edit shows.
+ * The checkout's snapshot from this session's start, taking it now if there is
+ * none (`isLate`: the checkout wasn't seen when the session started).
  */
-async function trackEdit($: $, e: object, next: (e: never) => Promise<unknown>) {
-  const input = e as { file_path?: unknown; notebook_path?: unknown }
-  const raw = input.file_path ?? input.notebook_path
-  if (typeof raw === 'string' && raw) {
-    const path = raw.startsWith('/') ? raw : join(await $.session.cwd(), raw)
-    await snapshot($, path).catch(() => undefined)
+async function baseline($: $, cwd: string, isAtStart = false) {
+  const ref = await snapshotRef($, cwd)
+  const found = await git($, cwd, ['rev-parse', '--verify', '--quiet', ref])
+  if (found.exitCode === 0) return { tree: found.stdout.trim(), isLate: false }
+  const tree = await writeTree($, cwd)
+  await git($, cwd, ['update-ref', ref, tree])
+  await pruneSnapshots($, cwd)
+  return { tree, isLate: !isAtStart }
+}
+
+/** Deletes this repo's snapshots from sessions that started more than SNAPSHOT_KEEP_MS ago. */
+async function pruneSnapshots($: $, cwd: string) {
+  const now = await $.clock.now()
+  const refs = await git($, cwd, ['for-each-ref', '--format=%(refname)', SNAPSHOT_REFS])
+  for (const ref of refs.stdout.split('\n').filter(Boolean)) {
+    const startedAt = Number(ref.slice(SNAPSHOT_REFS.length + 1).split('/')[0])
+    if (startedAt && now - startedAt > SNAPSHOT_KEEP_MS) await git($, cwd, ['update-ref', '-d', ref])
   }
+}
+
+/** Takes the session-start snapshot of every checkout in the folder that has none yet. */
+async function snapshotFolder($: $, dir: string) {
+  // session.start also fires when the mod reloads mid-session; a snapshot
+  // taken then is honest only as "since the pane first saw it".
+  const [{ startedAt }, now] = await Promise.all([$.session.usage(), $.clock.now()])
+  const isAtStart = now - startedAt < SESSION_START_GRACE_MS
+  for (const found of await discover($, dir)) {
+    for (const tree of await listWorktrees($, found.path)) {
+      await baseline($, tree.path, isAtStart).catch(() => undefined)
+    }
+  }
+}
+
+/** After a tool that may change files runs, refresh the open view so the change shows. */
+async function refreshAfter($: $, e: object, next: (e: never) => Promise<unknown>) {
   const result = await next(e as never)
   const current = await read($, worktree)
   if (current) await showTree($, current).catch(() => undefined)
@@ -489,24 +546,29 @@ export const register: Register = on => {
       name: COMMAND,
       description: 'Browse uncommitted changes across every git repo in this folder',
     })
+    // Snapshot every checkout in the folder for "Changes since this session
+    // started". Off the startup path, so the first prompt doesn't wait on git.
+    // A resumed session already has its snapshots and keeps them.
+    $.clock.after(0, () => void snapshotFolder($, toSlash(e.cwd)).catch(() => undefined))
     return next(e)
   })
 
   // `/multi-diff` scans the session's folder; `/multi-diff <dir>` scans another.
   on('command.run', { command: COMMAND }, async ($, e) => {
     const arg = e.args.trim()
-    const target = arg.startsWith('/') ? arg : arg ? join(await $.session.cwd(), arg) : await $.session.cwd()
+    const target = toSlash(isAbsolute(arg) ? arg : arg ? join(await $.session.cwd(), arg) : await $.session.cwd())
     await refresh($, target)
     await $.ui.open({ id: PANE, title: 'Multi-repo diff', focus: true })
     const found = await read($, repos)
     return { text: `Multi-repo diff: ${found.length} repo(s) in ${target}.` }
   })
 
-  // Session mode tracks the tools that edit files.
-  on('tool.call', { tool: 'Edit' }, ($, e, next) => trackEdit($, e, next as never))
-  on('tool.call', { tool: 'MultiEdit' }, ($, e, next) => trackEdit($, e, next as never))
-  on('tool.call', { tool: 'Write' }, ($, e, next) => trackEdit($, e, next as never))
-  on('tool.call', { tool: 'NotebookEdit' }, ($, e, next) => trackEdit($, e, next as never))
+  // Refresh the open view after the tools that can change files, shell commands included.
+  on('tool.call', { tool: 'Edit' }, ($, e, next) => refreshAfter($, e, next as never))
+  on('tool.call', { tool: 'MultiEdit' }, ($, e, next) => refreshAfter($, e, next as never))
+  on('tool.call', { tool: 'Write' }, ($, e, next) => refreshAfter($, e, next as never))
+  on('tool.call', { tool: 'NotebookEdit' }, ($, e, next) => refreshAfter($, e, next as never))
+  on('tool.call', { tool: 'Bash' }, ($, e, next) => refreshAfter($, e, next as never))
 
   // Answer the pane's controls by key instead of relying on their closures.
   on('ui.press', { requestId: PANE }, async ($, e) => {
