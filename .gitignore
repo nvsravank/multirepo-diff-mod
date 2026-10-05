@@ -1,3 +1,7 @@
 .DS_Store
 node_modules/
 .claude/types/
+# Written by Claude Code when it loads the plugin
+.claude-plugin/types/
+# Worktrees kept inside the repo (Claude Code puts its own here too)
+.claude/worktrees/
