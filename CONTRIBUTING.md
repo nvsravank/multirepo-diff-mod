@@ -1,11 +1,14 @@
 # Contributing
 
-Thanks for helping out!
+Thanks for your interest! This project doesn't accept code contributions, so
+pull requests are limited to the maintainer.
 
-1. Fork the repo and create a branch from `main` (for example `fix/rename-diff`).
-2. Make your change. Run `claude plugin validate .` and
-   `claude plugin test .`.
-3. Open a pull request against `main` and describe what changed and why.
+You can still help:
 
-The maintainer reviews every PR before it is merged. For larger changes, please
-open an issue first so we can agree on the approach.
+- **Report a bug or ask for a feature:** open an
+  [issue](https://github.com/nvsravank/multirepo-diff-mod/issues/new/choose). Include your Claude Code version and whether
+  you use the terminal or the Desktop app.
+- **Report a security problem:** see [SECURITY.md](SECURITY.md). Please don't
+  open a public issue for it.
+- **Make your own version:** fork the repository and change it however you like
+  under the [MIT license](LICENSE).
