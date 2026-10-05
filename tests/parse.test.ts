@@ -103,8 +103,8 @@ describe('Code blocks for the terminal diff view', () => {
   })
 
   test('a hunk too big for one block splits under 10,000 characters with recounted headers', () => {
-    const lines = Array.from({ length: 3000 }, (_, i) => (i % 3 === 0 ? `+added ${i}` : ` context ${i}`))
-    const blocks = toBlocks([`@@ -1,2000 +1,3000 @@\n${lines.join('\n')}`])
+    const lines = Array.from({ length: 3000 }, (_, i) => (i % 3 === 0 ? '+added ' + i : ' context ' + i))
+    const blocks = toBlocks(['@@ -1,2000 +1,3000 @@\n' + lines.join('\n')])
     expect(blocks.length > 1).toBe(true)
     for (const block of blocks) {
       expect(block.length < 10000).toBe(true)
@@ -133,7 +133,7 @@ describe('file tree', () => {
 
   test('folders first, then files, each sorted, with depth', () => {
     const rows = toTree(files, new Set())
-    expect(rows.map(row => `${'  '.repeat(row.depth)}${row.name}`)).toEqual([
+    expect(rows.map(row => '  '.repeat(row.depth) + row.name)).toEqual([
       'hooks',
       '  parse.ts',
       '  register.tsx',

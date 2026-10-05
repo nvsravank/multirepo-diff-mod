@@ -229,7 +229,7 @@ export function parseWorktrees(out: string): Worktree[] {
     .split(/\r?\n\r?\n/)
     .map(block => {
       const lines = block.split(/\r?\n/)
-      const value = (key: string) => lines.find(line => line.startsWith(`${key} `))?.slice(key.length + 1)
+      const value = (field: string) => lines.find(line => line.startsWith(field + ' '))?.slice(field.length + 1)
       const raw = value('worktree')
       const path = raw ? toSlash(raw) : undefined
       const ref = value('branch')
@@ -242,7 +242,7 @@ export function parseWorktrees(out: string): Worktree[] {
  * A short, stable name for a folder (8 hex characters, FNV-1a of the path as
  * samePath compares it), so each checkout of a repo gets its own snapshot ref.
  */
-export function pathKey(path: string) {
+export function folderHash(path: string) {
   let hash = 0x811c9dc5
   for (const char of comparable(path)) {
     hash ^= char.codePointAt(0) ?? 0

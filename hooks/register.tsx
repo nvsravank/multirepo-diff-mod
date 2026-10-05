@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { DiffMode, DiffView, FileChange, Repo, Theme, Worktree } from '../types'
 import { toRows } from './diff'
-import { DIFF, baseName, isAbsolute, join, parseNameStatus, parseStatus, parseWorktrees, pathKey, toBlocks, samePath, toSlash, toTree, toView, untracked } from './parse'
+import { DIFF, baseName, isAbsolute, join, parseNameStatus, parseStatus, parseWorktrees, folderHash, toBlocks, samePath, toSlash, toTree, toView, untracked } from './parse'
 
 const PANE = 'multi-diff'
 const COMMAND = 'multi-diff'
@@ -401,7 +401,7 @@ async function writeTree($: Engine, cwd: string) {
 /** This session's snapshot ref for a checkout. */
 async function snapshotRef($: Engine, cwd: string) {
   const { startedAt } = await $.session.usage()
-  return `${SNAPSHOT_REFS}/${startedAt}/${pathKey(cwd)}`
+  return `${SNAPSHOT_REFS}/${startedAt}/${folderHash(cwd)}`
 }
 
 /**
