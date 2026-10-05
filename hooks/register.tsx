@@ -26,7 +26,7 @@ const theme = atom({ plugin: 'multirepo-diff-mod', key: 'theme' } as const, 'lig
 const diffPage = atom({ plugin: 'multirepo-diff-mod', key: 'diffPage' } as const, 0)
 const treePage = atom({ plugin: 'multirepo-diff-mod', key: 'treePage' } as const, 0)
 
-type $ = EngineInterface
+type Engine = EngineInterface
 
 const EMPTY: DiffView = { kind: 'empty' }
 
@@ -39,19 +39,19 @@ const MODES: readonly { value: DiffMode; label: string; empty: string }[] = [
 ]
 
 
-function git($: $, cwd: string, args: string[], env?: Record<string, string>, timeoutMs = 20000) {
+function git($: Engine, cwd: string, args: string[], env?: Record<string, string>, timeoutMs = 20000) {
   return $.process.run(['git', '--no-pager', ...args], { cwd, env, timeoutMs })
 }
 
 // --- discovery -------------------------------------------------------------
 
-async function isRepoRoot($: $, dir: string) {
+async function isRepoRoot($: Engine, dir: string) {
   const r = await git($, dir, ['rev-parse', '--show-toplevel'])
   return r.exitCode === 0 && samePath(r.stdout.trim(), dir)
 }
 
 /** The main checkout a repo or linked worktree belongs to (its common .git's folder). */
-async function mainCheckout($: $, path: string) {
+async function mainCheckout($: Engine, path: string) {
   const r = await git($, path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
   const common = toSlash(r.stdout.trim())
   return r.exitCode === 0 && common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : path
@@ -62,7 +62,7 @@ async function mainCheckout($: $, path: string) {
  * a `.git`. A linked worktree of a repo already listed is left out: it shows
  * in that repo's worktree picker instead.
  */
-async function discover($: $, dir: string): Promise<Repo[]> {
+async function discover($: Engine, dir: string): Promise<Repo[]> {
   const candidates: Repo[] = []
   if (await isRepoRoot($, dir)) candidates.push({ name: `${baseName(dir)} (main)`, path: dir })
 
@@ -81,14 +81,14 @@ async function discover($: $, dir: string): Promise<Repo[]> {
 }
 
 /** Every worktree of the repo, its main checkout first. */
-async function listWorktrees($: $, repoPath: string): Promise<Worktree[]> {
+async function listWorktrees($: Engine, repoPath: string): Promise<Worktree[]> {
   const r = await git($, repoPath, ['worktree', 'list', '--porcelain'])
   const list = r.exitCode === 0 ? parseWorktrees(r.stdout) : []
   return list.length ? list : [{ path: repoPath, branch: null, sha: '' }]
 }
 
 /** What HEAD is in a checkout, for the comparison line: the branch, or "detached at <sha>". */
-async function headLabel($: $, cwd: string) {
+async function headLabel($: Engine, cwd: string) {
   const [branch, sha] = await Promise.all([
     git($, cwd, ['branch', '--show-current']),
     git($, cwd, ['rev-parse', '--short', 'HEAD']),
@@ -106,7 +106,7 @@ type Base = { ref: string; sha: string }
  * remote's default branch (origin/HEAD), else origin/main, origin/master,
  * main or master, the first that exists.
  */
-async function findBase($: $, cwd: string): Promise<Base | null> {
+async function findBase($: Engine, cwd: string): Promise<Base | null> {
   const remoteHead = await git($, cwd, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
   const candidates = [remoteHead.stdout.trim(), 'origin/main', 'origin/master', 'main', 'master']
   for (const ref of [...new Set(candidates.filter(Boolean))]) {
@@ -124,7 +124,7 @@ type Listing = { files: FileChange[]; note: string; error?: string }
 
 
 async function listChanges(
-  $: $,
+  $: Engine,
   cwd: string,
   mode: DiffMode,
 ): Promise<Listing> {
@@ -190,7 +190,7 @@ async function listChanges(
 
 // --- one file's diff -------------------------------------------------------
 
-async function fileDiff($: $, cwd: string, mode: DiffMode, change: FileChange): Promise<DiffView> {
+async function fileDiff($: Engine, cwd: string, mode: DiffMode, change: FileChange): Promise<DiffView> {
   const paths = change.from ? ['--', change.from, change.path] : ['--', change.path]
 
   if (mode === 'session' && change.trees) {
@@ -231,7 +231,7 @@ async function fileDiff($: $, cwd: string, mode: DiffMode, change: FileChange): 
 let listTicket = 0
 let diffTicket = 0
 
-async function showFile($: $, path: string) {
+async function showFile($: Engine, path: string) {
   const ticket = ++diffTicket
   await update($, file, () => path)
   await update($, diffPage, () => 0)
@@ -251,7 +251,7 @@ async function showFile($: $, path: string) {
 }
 
 /** Lists the changes of one checkout: the repo's main path or one of its worktrees. */
-async function showTree($: $, wanted: string) {
+async function showTree($: Engine, wanted: string) {
   const ticket = ++listTicket
   // Worktrees come and go (added, moved, removed) outside the pane, so the
   // picker's list is reloaded on every load rather than only on a repo pick,
@@ -292,7 +292,7 @@ async function showTree($: $, wanted: string) {
  * Picks a repo: loads its worktrees and shows the main checkout, or `keep`
  * when that is one of its worktrees (so a refresh stays on the same one).
  */
-async function selectRepo($: $, repoPath: string, keep?: string) {
+async function selectRepo($: Engine, repoPath: string, keep?: string) {
   await update($, repo, () => repoPath)
   const trees = await listWorktrees($, repoPath)
   await update($, worktrees, () => trees)
@@ -300,7 +300,7 @@ async function selectRepo($: $, repoPath: string, keep?: string) {
   await showTree($, (kept ?? trees[0]).path)
 }
 
-async function setMode($: $, next: DiffMode) {
+async function setMode($: Engine, next: DiffMode) {
   await update($, mode, () => next)
   const current = await read($, worktree)
   // No repo picked yet (e.g. right after a restart): rescan and pick one.
@@ -308,7 +308,7 @@ async function setMode($: $, next: DiffMode) {
   else await refresh($)
 }
 
-async function refresh($: $, dir?: string) {
+async function refresh($: Engine, dir?: string) {
   const where = toSlash(dir || (await read($, root)) || (await $.session.cwd()))
   await update($, root, () => where)
   try {
@@ -335,13 +335,13 @@ async function refresh($: $, dir?: string) {
   }
 }
 
-async function toggleTheme($: $) {
+async function toggleTheme($: Engine) {
   const next = await update($, theme, current => (current === 'light' ? 'dark' : 'light'))
   await $.store.set(THEME_STORE_KEY, next)
 }
 
 /** Shows or hides detached worktrees in the picker; hiding moves off one. */
-async function toggleDetached($: $) {
+async function toggleDetached($: Engine) {
   const isShowing = await update($, showDetached, shown => !shown)
   if (isShowing) return
   const [trees, current] = await Promise.all([read($, worktrees), read($, worktree)])
@@ -349,11 +349,11 @@ async function toggleDetached($: $) {
   if (viewed && !viewed.branch) await showTree($, trees[0].path)
 }
 
-async function toggleList($: $) {
+async function toggleList($: Engine) {
   await update($, isListCollapsed, hidden => !hidden)
 }
 
-async function toggleDir($: $, path: string) {
+async function toggleDir($: Engine, path: string) {
   await update($, collapsedDirs, list => (list.includes(path) ? list.filter(one => one !== path) : [...list, path]))
 }
 
@@ -380,19 +380,16 @@ const SESSION_START_GRACE_MS = 2 * 60 * 1000
 // Writing a tree of a big checkout can take a while.
 const WRITE_TREE_TIMEOUT_MS = 120_000
 
-/** The system's temp folder (TMPDIR on macOS and Linux, TEMP or TMP on Windows, else /tmp). */
-async function tempDir($: $) {
-  const temp = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
-  const dir = join(temp, 'multirepo-diff-mod')
-  // git won't create the folder for its index file; writing a file here does.
-  if (!(await $.fs.exists(dir))) await $.fs.write(join(dir, '.keep'), '')
-  return dir
-}
-
-/** Writes the checkout's files as they are now into git's store; returns the tree id. */
-async function writeTree($: $, cwd: string) {
-  // A throwaway index per checkout; seeding it from HEAD means git only hashes what changed.
-  const env = { GIT_INDEX_FILE: join(await tempDir($), `index-${pathKey(cwd)}`) }
+/**
+ * Writes the checkout's files as they are now into git's store; returns the
+ * tree id. It uses a throwaway index file inside the checkout's own git folder
+ * (git rev-parse --git-path gives it, worktrees included), seeded from HEAD so
+ * git only hashes what changed. The real index is never touched.
+ */
+async function writeTree($: Engine, cwd: string) {
+  const indexPath = await git($, cwd, ['rev-parse', '--path-format=absolute', '--git-path', 'multirepo-diff-index'])
+  if (indexPath.exitCode !== 0) throw new Error(indexPath.stderr.trim() || 'git rev-parse failed')
+  const env = { GIT_INDEX_FILE: indexPath.stdout.trim() }
   await git($, cwd, ['read-tree', 'HEAD'], env) // fails harmlessly in a repo with no commits
   const added = await git($, cwd, ['add', '-A'], env, WRITE_TREE_TIMEOUT_MS)
   if (added.exitCode !== 0) throw new Error(added.stderr.trim() || 'git add failed')
@@ -402,7 +399,7 @@ async function writeTree($: $, cwd: string) {
 }
 
 /** This session's snapshot ref for a checkout. */
-async function snapshotRef($: $, cwd: string) {
+async function snapshotRef($: Engine, cwd: string) {
   const { startedAt } = await $.session.usage()
   return `${SNAPSHOT_REFS}/${startedAt}/${pathKey(cwd)}`
 }
@@ -411,7 +408,7 @@ async function snapshotRef($: $, cwd: string) {
  * The checkout's snapshot from this session's start, taking it now if there is
  * none (`isLate`: the checkout wasn't seen when the session started).
  */
-async function baseline($: $, cwd: string, isAtStart = false) {
+async function baseline($: Engine, cwd: string, isAtStart = false) {
   const ref = await snapshotRef($, cwd)
   const found = await git($, cwd, ['rev-parse', '--verify', '--quiet', ref])
   if (found.exitCode === 0) return { tree: found.stdout.trim(), isLate: false }
@@ -422,7 +419,7 @@ async function baseline($: $, cwd: string, isAtStart = false) {
 }
 
 /** Deletes this repo's snapshots from sessions that started more than SNAPSHOT_KEEP_MS ago. */
-async function pruneSnapshots($: $, cwd: string) {
+async function pruneSnapshots($: Engine, cwd: string) {
   const now = await $.clock.now()
   const refs = await git($, cwd, ['for-each-ref', '--format=%(refname)', SNAPSHOT_REFS])
   for (const ref of refs.stdout.split('\n').filter(Boolean)) {
@@ -432,7 +429,7 @@ async function pruneSnapshots($: $, cwd: string) {
 }
 
 /** Takes the session-start snapshot of every checkout in the folder that has none yet. */
-async function snapshotFolder($: $, dir: string) {
+async function snapshotFolder($: Engine, dir: string) {
   // session.start also fires when the mod reloads mid-session; a snapshot
   // taken then is honest only as "since the pane first saw it".
   const [{ startedAt }, now] = await Promise.all([$.session.usage(), $.clock.now()])
@@ -445,7 +442,7 @@ async function snapshotFolder($: $, dir: string) {
 }
 
 /** After a tool that may change files runs, refresh the open view so the change shows. */
-async function refreshAfter($: $, e: object, next: (e: never) => Promise<unknown>) {
+async function refreshAfter($: Engine, e: object, next: (e: never) => Promise<unknown>) {
   const result = await next(e as never)
   const current = await read($, worktree)
   if (current) await showTree($, current).catch(() => undefined)
@@ -458,7 +455,7 @@ async function refreshAfter($: $, e: object, next: (e: never) => Promise<unknown
 // that should reach a Button's onPress closure, so every control in the pane
 // is also answered here by its key, at the ui.press / ui.select events.
 
-async function handlePress($: $, key: string) {
+async function handlePress($: Engine, key: string) {
   if (key === 'refresh') await refresh($)
   else if (key === 'theme') await toggleTheme($)
   else if (key === 'files') await toggleList($)
@@ -471,15 +468,15 @@ async function handlePress($: $, key: string) {
   else if (key === 'tree-next') await turnTreePage($, 1)
 }
 
-async function turnTreePage($: $, by: number) {
+async function turnTreePage($: Engine, by: number) {
   await update($, treePage, n => Math.max(0, n + by))
 }
 
-async function turnPage($: $, by: number) {
+async function turnPage($: Engine, by: number) {
   await update($, diffPage, n => Math.max(0, n + by))
 }
 
-async function handleSelect($: $, key: string, value: string) {
+async function handleSelect($: Engine, key: string, value: string) {
   if (key === 'repo') await selectRepo($, value)
   else if (key === 'worktree') await showTree($, value)
   else if (key === 'mode') await setMode($, value as DiffMode)

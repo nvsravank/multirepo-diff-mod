@@ -40,26 +40,43 @@ and it hot-reloads when you edit it.
 
 ## What it runs and changes
 
-The mod makes no network requests and sends no data anywhere. On your machine
-it does the following:
+**It sends nothing anywhere.** The mod makes no network requests and doesn't
+read your conversation with Claude. It only reads your files through `git`,
+and shows the result in its own pane.
 
-- **Runs `git`** in the folder you open and in the repos and worktrees inside
-  it, to list repos, worktrees and changed files and to produce diffs.
-- **Reads the folder listing** of the folder you open, one level deep, to find
-  repos.
-- **Writes session snapshots into each repo's `.git` folder.** When a session
-  starts, it stores a snapshot of the repo's files (a git tree) and a ref under
-  `refs/multirepo-diff/` that points to it. It deletes its own refs after 30
-  days. It never commits, changes branches, edits your files or touches your
-  staging area.
-- **Writes a temporary git index file** per checkout in your system's temp
-  folder (`TMPDIR`, `TEMP` or `TMP`), under `multirepo-diff-mod/`, to build those
+**The only program it runs is `git`**, in the folder you open and the repos and
+worktrees inside it. The git commands, and why:
+
+| Command | Why |
+| --- | --- |
+| `git --version` | Check git works before scanning |
+| `git rev-parse` | Find a repo's root, its main checkout, HEAD, and git's own folder paths |
+| `git branch --show-current`, `git symbolic-ref`, `git merge-base` | Name the branch and find the base for the pull request view |
+| `git worktree list` | List a repo's worktrees |
+| `git status`, `git diff`, `git ls-files` | List changed files and show diffs |
+| `git read-tree`, `git add -A`, `git write-tree` | Build a session snapshot, using the mod's own index file, never yours |
+| `git update-ref`, `git for-each-ref` | Keep and clean up its snapshot refs |
+
+**What it writes, all inside each repo's `.git` folder:**
+
+- **Session snapshots.** When a session starts, it stores a snapshot of the
+  repo's files (a git tree) and a ref under `refs/multirepo-diff/` that points
+  to it, and deletes its own refs after 30 days.
+- **A scratch index file**, `.git/multirepo-diff-index`, used to build those
   snapshots.
-- **Remembers your light/dark choice** in Claude Code's plugin storage.
+
+It never commits, changes branches, edits your files or touches your staging
+area. It also reads the folder you open, one level deep, to find repos, and
+remembers your light/dark choice in Claude Code's plugin storage.
+
+**How it hooks into Claude Code:** it adds the `/multi-diff` command and answers
+only that command. It watches Claude's file-editing and shell tools only to
+refresh its pane after they run; it passes every tool call through unchanged
+and never approves, blocks or alters one.
 
 To remove the snapshots from a repo, run
 `git for-each-ref --format='%(refname)' refs/multirepo-diff/ | xargs -n1 git update-ref -d`
-in it.
+in it, and delete `.git/multirepo-diff-index`.
 
 ## Platforms
 
