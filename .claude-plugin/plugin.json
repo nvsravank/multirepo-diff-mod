@@ -1,7 +1,7 @@
 {
   "name": "multirepo-diff-mod",
   "displayName": "Multi-repo Diff",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "/multi-diff: a worktree-aware diff viewer for every git repo in your project folder, with uncommitted, staged, pull request and since-this-session views",
   "author": { "name": "Sravan", "url": "https://github.com/nvsravank" },
   "homepage": "https://github.com/nvsravank/multirepo-diff-mod",
