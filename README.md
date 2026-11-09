@@ -16,12 +16,13 @@ one pane.
     (or the repo's default branch)
   - **Changes since this session started**: every change since the
     conversation began, made by Claude or anyone, by any tool (edits, scripts,
-    shell commands). When a session starts, the mod takes a git snapshot of
-    each repo and worktree in the folder; a resumed conversation keeps its
-    snapshot, while `/clear` or a new conversation starts a new one. The
-    snapshots live in each repo's `.git` under `refs/multirepo-diff/` and are
-    removed after 30 days. Your files, branches and staged changes are never
-    touched.
+    shell commands). When a session starts, the mod takes a snapshot of each
+    repo and worktree in the folder; a resumed conversation keeps its
+    snapshot, while `/clear` or a new conversation starts a new one. Untracked
+    files are recorded by hash only, not copied, so for a file that was
+    untracked at the start the pane can say it changed or was deleted, but not
+    show the old text. See [What it runs and changes](#what-it-runs-and-changes).
+    Your files, branches and staged changes are never touched.
 - Changed files show as a tree on the left (☰ hides it), and the selected
   file's diff is on the right. ⟳ rescans, and ☀/☾ switches the diff's colors.
 
@@ -54,16 +55,32 @@ worktrees inside it. The git commands, and why:
 | `git branch --show-current`, `git symbolic-ref`, `git merge-base` | Name the branch and find the base for the pull request view |
 | `git worktree list` | List a repo's worktrees |
 | `git status`, `git diff`, `git ls-files` | List changed files and show diffs |
-| `git read-tree`, `git add -A`, `git write-tree` | Build a session snapshot, using the mod's own index file, never yours |
-| `git update-ref`, `git for-each-ref` | Keep and clean up its snapshot refs |
+| `git read-tree`, `git update-index --refresh`, `git add`, `git write-tree` | Build a session snapshot, and compare with it, using the mod's own index files, never yours |
+| `git hash-object`, `git cat-file` | Hash untracked files without storing them; check a snapshot still exists |
+| `git for-each-ref`, `git update-ref -d` | Delete the snapshot refs that earlier versions of the mod left |
 
 **What it writes, all inside each repo's `.git` folder:**
 
-- **Session snapshots.** When a session starts, it stores a snapshot of the
-  repo's files (a git tree) and a ref under `refs/multirepo-diff/` that points
-  to it, and deletes its own refs after 30 days.
-- **A scratch index file**, `.git/multirepo-diff-index`, used to build those
-  snapshots.
+- **Session snapshots.** When a session starts, it stores a git tree of the
+  repo's tracked files in `.git/objects`. Files you haven't changed are
+  already there, so only the contents of tracked files you've edited but not
+  committed are added.
+  - **Untracked files are never copied.** That includes ones `.gitignore`
+    doesn't cover, like a `.env` or a data export. The mod stores only a list
+    of their names with a hash of each. A file git already holds, such as a
+    staged new file, is put in the tree, because it is already in `.git`.
+  - **No ref points at a snapshot,** and no branch or tag either. Its ids
+    are kept in Claude Code's plugin storage. So `git push`, `git push --mirror`
+    and clones never include it, and git's own cleanup (`git gc`) deletes it
+    once it is a couple of weeks old.
+- **Two scratch index files**, `.git/multirepo-diff-snapshot-index` and
+  `.git/multirepo-diff-index`, used to take snapshots and compare with them.
+  The second also lists untracked files as "intent to add", which records
+  their names without storing their contents.
+
+Earlier versions kept snapshots, with copies of untracked files, under
+`refs/multirepo-diff/`. This version deletes those refs from each repo it
+snapshots.
 
 It never commits, changes branches, edits your files or touches your staging
 area. It also reads the folder you open, one level deep, to find repos, and
@@ -74,9 +91,13 @@ only that command. It watches Claude's file-editing and shell tools only to
 refresh its pane after they run; it passes every tool call through unchanged
 and never approves, blocks or alters one.
 
-To remove the snapshots from a repo, run
+To remove everything the mod left in a repo, delete
+`.git/multirepo-diff-snapshot-index` and `.git/multirepo-diff-index`; to drop
+the snapshots themselves right away rather than waiting for git, run
+`git gc --prune=now` (this also drops any other unreachable objects in the repo).
+For refs left by an earlier version, run
 `git for-each-ref --format='%(refname)' refs/multirepo-diff/ | xargs -n1 git update-ref -d`
-in it, and delete `.git/multirepo-diff-index`.
+first.
 
 ## Platforms
 

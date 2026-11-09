@@ -3,7 +3,26 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { DiffMode, DiffView, FileChange, Repo, Theme, Worktree } from '../types'
 import { toRows } from './diff'
-import { DIFF, baseName, isAbsolute, join, parseNameStatus, parseStatus, parseWorktrees, folderHash, toBlocks, samePath, toSlash, toTree, toView, untracked } from './parse'
+import {
+  DIFF,
+  baseName,
+  folderHash,
+  formatHashList,
+  isAbsolute,
+  join,
+  pairHashes,
+  parseHashList,
+  parseNameStatus,
+  parseStatus,
+  parseWorktrees,
+  samePath,
+  sessionChanges,
+  toBlocks,
+  toSlash,
+  toTree,
+  toView,
+  untracked,
+} from './parse'
 
 const PANE = 'multi-diff'
 const COMMAND = 'multi-diff'
@@ -39,8 +58,8 @@ const MODES: readonly { value: DiffMode; label: string; empty: string }[] = [
 ]
 
 
-function git($: Engine, cwd: string, args: string[], env?: Record<string, string>, timeoutMs = 20000) {
-  return $.process.run(['git', '--no-pager', ...args], { cwd, env, timeoutMs })
+function git($: Engine, cwd: string, args: string[], env?: Record<string, string>, timeoutMs = 20000, stdin?: string) {
+  return $.process.run(['git', '--no-pager', ...args], { cwd, env, timeoutMs, stdin })
 }
 
 // --- discovery -------------------------------------------------------------
@@ -177,14 +196,25 @@ async function listChanges(
   }
 
   // session: the snapshot from the session's start vs the files now
-  const base = await baseline($, cwd)
-  const now = await writeTree($, cwd)
-  const r = await git($, cwd, ['diff', '--name-status', '-z', '-M', base.tree, now])
+  const { snapshot, isLate } = await baseline($, cwd)
+  const env = await nowIndex($, cwd)
+  const r = await git($, cwd, ['diff', '--name-status', '-z', '-M', snapshot.tree], env, WRITE_TREE_TIMEOUT_MS)
   if (r.exitCode !== 0) return fail(r, 'git diff')
-  const since = base.isLate ? 'when this pane first saw this checkout' : 'this session started'
+  const diffed = parseNameStatus(r.stdout)
+
+  // Files untracked at the start: compare hashes, since their contents weren't kept.
+  const atStart = snapshot.untracked ? parseHashList((await git($, cwd, ['cat-file', 'blob', snapshot.untracked])).stdout) : new Map<string, string>()
+  const stillThere = diffed.filter(one => one.status.startsWith('A') && atStart.has(one.path)).map(one => one.path)
+  const shown = new Set(stillThere)
+  const missing = [...atStart.keys()].filter(path => !shown.has(path))
+  const exists = await Promise.all(missing.map(path => $.fs.exists(join(cwd, path))))
+  const gone = missing.filter((_, i) => !exists[i])
+  const files = sessionChanges(diffed, atStart, await hashFiles($, cwd, stillThere), gone).map(one => ({ ...one, base: snapshot.tree }))
+
+  const since = isLate ? 'when this pane first saw this checkout' : 'this session started'
   return {
-    files: parseNameStatus(r.stdout).map(one => ({ ...one, trees: { base: base.tree, now } })),
-    note: `${head.name}: every change since ${since}, by Claude or anyone (snapshot ${base.tree.slice(0, 7)})`,
+    files,
+    note: `${head.name}: every change since ${since}, by Claude or anyone (snapshot ${snapshot.tree.slice(0, 7)})`,
   }
 }
 
@@ -193,8 +223,17 @@ async function listChanges(
 async function fileDiff($: Engine, cwd: string, mode: DiffMode, change: FileChange): Promise<DiffView> {
   const paths = change.from ? ['--', change.from, change.path] : ['--', change.path]
 
-  if (mode === 'session' && change.trees) {
-    const r = await git($, cwd, [...DIFF, change.trees.base, change.trees.now, ...paths])
+  if (mode === 'session' && change.base) {
+    if (change.isUnsaved) {
+      const what = change.status.startsWith('D') ? 'Deleted since the session started.' : 'Changed since the session started.'
+      return {
+        kind: 'text',
+        text: `${what} It was untracked then, and the snapshot keeps only a hash of untracked files, not a copy, so there is no earlier version to compare with.`,
+      }
+    }
+    // Against the working files, through the index nowIndex built for the listing.
+    const env = await scratchIndex($, cwd, NOW_INDEX)
+    const r = await git($, cwd, [...DIFF, change.base, ...paths], env)
     return toView(r.stdout)
   }
 
@@ -359,73 +398,181 @@ async function toggleDir($: Engine, path: string) {
 
 // --- session snapshots -----------------------------------------------------
 //
-// "Changes since this session started" compares each checkout with a git
-// snapshot taken when the conversation began: a tree of every file (tracked,
-// plus untracked ones .gitignore doesn't exclude), written through a temporary
-// index so the real staging area, branches and files are never touched. A ref
-// under refs/multirepo-diff/ keeps git from pruning it.
+// "Changes since this session started" compares each checkout with a snapshot
+// taken when the conversation began, made through a scratch index file so the
+// real staging area, branches and files are never touched:
+//
+// - Tracked files: a git tree of them as they were. Unchanged ones are already
+//   in git; an edited one's contents get hashed into .git/objects.
+// - Untracked files (those .gitignore doesn't exclude): only a hash of each,
+//   never a copy, so a stray .env or data export isn't stored in .git. (One
+//   git already holds, like a staged new file, goes in the tree too: no copy
+//   is made, and its diff stays whole.) The list of names and hashes is a
+//   small blob.
+//
+// No ref points at a snapshot. Its ids sit in the plugin's own store, so no
+// push (`--mirror` included) can send it, and git's own cleanup deletes it
+// after a couple of weeks. Should that happen mid-session, a new one is taken.
 //
 // Snapshots are keyed by the session's start time, which stays the same when
 // a conversation is resumed after a restart, and starts over on /clear or in a
 // new conversation.
 
-const SNAPSHOT_REFS = 'refs/multirepo-diff'
+type Snapshot = {
+  /** Tree of the tracked files (and untracked ones git already held). */
+  tree: string
+  /** Blob listing the other untracked files with their hashes, or '' for none. */
+  untracked: string
+}
 
-// Snapshots older than this are deleted when a new one is taken.
+const SNAPSHOT_STORE = 'snapshot/'
+
+// Earlier versions kept snapshots under these refs; they're deleted on sight.
+const LEGACY_REFS = 'refs/multirepo-diff'
+
+// Store entries for sessions that started longer ago than this are dropped.
 const SNAPSHOT_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
 // A snapshot taken this soon after the session started counts as taken at its start.
 const SESSION_START_GRACE_MS = 2 * 60 * 1000
 
-// Writing a tree of a big checkout can take a while.
+// Hashing a big checkout can take a while.
 const WRITE_TREE_TIMEOUT_MS = 120_000
 
-/**
- * Writes the checkout's files as they are now into git's store; returns the
- * tree id. It uses a throwaway index file inside the checkout's own git folder
- * (git rev-parse --git-path gives it, worktrees included), seeded from HEAD so
- * git only hashes what changed. The real index is never touched.
- */
-async function writeTree($: Engine, cwd: string) {
-  const indexPath = await git($, cwd, ['rev-parse', '--path-format=absolute', '--git-path', 'multirepo-diff-index'])
-  if (indexPath.exitCode !== 0) throw new Error(indexPath.stderr.trim() || 'git rev-parse failed')
-  const env = { GIT_INDEX_FILE: indexPath.stdout.trim() }
-  await git($, cwd, ['read-tree', 'HEAD'], env) // fails harmlessly in a repo with no commits
-  const added = await git($, cwd, ['add', '-A'], env, WRITE_TREE_TIMEOUT_MS)
-  if (added.exitCode !== 0) throw new Error(added.stderr.trim() || 'git add failed')
-  const tree = await git($, cwd, ['write-tree'], env)
-  if (tree.exitCode !== 0) throw new Error(tree.stderr.trim() || 'git write-tree failed')
-  return tree.stdout.trim()
+// The scratch index files, inside the checkout's own git folder: one for
+// taking snapshots, one for comparing with the files now.
+const SNAPSHOT_INDEX = 'multirepo-diff-snapshot-index'
+const NOW_INDEX = 'multirepo-diff-index'
+
+function check(r: { exitCode: number; stderr: string }, what: string) {
+  if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `${what} failed`)
 }
 
-/** This session's snapshot ref for a checkout. */
-async function snapshotRef($: Engine, cwd: string) {
+/** Env pointing git at one of the scratch index files (git rev-parse --git-path finds it, worktrees included). */
+async function scratchIndex($: Engine, cwd: string, name: string) {
+  const r = await git($, cwd, ['rev-parse', '--path-format=absolute', '--git-path', name])
+  check(r, 'git rev-parse')
+  return { GIT_INDEX_FILE: r.stdout.trim() }
+}
+
+/** Resets a scratch index to HEAD (empty with no commits yet) and fills in file stats, so later reads skip unchanged files. */
+async function resetIndex($: Engine, cwd: string, env: Record<string, string>) {
+  const r = await git($, cwd, ['read-tree', 'HEAD'], env)
+  if (r.exitCode !== 0) check(await git($, cwd, ['read-tree', '--empty'], env), 'git read-tree')
+  // Exits 1 when files differ from HEAD; that's expected. It only reads files.
+  await git($, cwd, ['update-index', '-q', '--refresh'], env, WRITE_TREE_TIMEOUT_MS)
+}
+
+/** Untracked files .gitignore doesn't exclude, relative to the index in `env`. */
+async function listUntracked($: Engine, cwd: string, env: Record<string, string>) {
+  const r = await git($, cwd, ['ls-files', '--others', '--exclude-standard', '-z'], env, WRITE_TREE_TIMEOUT_MS)
+  check(r, 'git ls-files')
+  return r.stdout.split('\0').filter(Boolean)
+}
+
+/** Each file's git hash, computed without storing anything. Paths with a line break can't be passed and are left out. */
+async function hashFiles($: Engine, cwd: string, paths: readonly string[]) {
+  const usable = paths.filter(path => !/[\r\n]/.test(path))
+  if (!usable.length) return new Map<string, string>()
+  const r = await git($, cwd, ['hash-object', '--stdin-paths'], undefined, WRITE_TREE_TIMEOUT_MS, usable.map(path => `${path}\n`).join(''))
+  check(r, 'git hash-object')
+  return pairHashes(usable, r.stdout)
+}
+
+/** Which of these object ids git's store holds. */
+async function heldObjects($: Engine, cwd: string, ids: readonly string[]) {
+  if (!ids.length) return new Set<string>()
+  const r = await git($, cwd, ['cat-file', '--batch-check'], undefined, WRITE_TREE_TIMEOUT_MS, ids.map(id => `${id}\n`).join(''))
+  return new Set(r.stdout.split(/\r?\n/).filter(line => line && !line.endsWith(' missing')).map(line => line.split(' ')[0]))
+}
+
+/** Adds paths to the index in `env`, read from stdin so a long list fits, and taken literally rather than as patterns. */
+function addPaths($: Engine, cwd: string, env: Record<string, string>, paths: readonly string[], flags: string[] = []) {
+  return git($, cwd, ['--literal-pathspecs', 'add', ...flags, '--pathspec-from-file=-', '--pathspec-file-nul'], env, WRITE_TREE_TIMEOUT_MS, paths.join('\0'))
+}
+
+/** Takes a snapshot of the checkout as it is now (see the top of this section). */
+async function takeSnapshot($: Engine, cwd: string): Promise<Snapshot> {
+  const env = await scratchIndex($, cwd, SNAPSHOT_INDEX)
+  await resetIndex($, cwd, env)
+  // Tracked files: record edits and deletions. This runs before any untracked
+  // file is in the index, so none of their contents are stored.
+  check(await git($, cwd, ['add', '-u'], env, WRITE_TREE_TIMEOUT_MS), 'git add')
+
+  const untracked = await listUntracked($, cwd, env)
+  const hashes = await hashFiles($, cwd, untracked)
+  const held = await heldObjects($, cwd, [...new Set(hashes.values())])
+  const known = [...hashes].filter(([, hash]) => held.has(hash)).map(([path]) => path)
+  if (known.length) check(await addPaths($, cwd, env, known), 'git add')
+  for (const path of known) hashes.delete(path)
+
+  const tree = await git($, cwd, ['write-tree'], env)
+  check(tree, 'git write-tree')
+  let list = ''
+  if (hashes.size) {
+    const r = await git($, cwd, ['hash-object', '-w', '--stdin'], undefined, 20000, formatHashList(hashes))
+    check(r, 'git hash-object')
+    list = r.stdout.trim()
+  }
+  return { tree: tree.stdout.trim(), untracked: list }
+}
+
+/**
+ * Points the "now" scratch index at the files as they are: HEAD's files, plus
+ * every untracked file marked intent-to-add (no contents stored), so that
+ * `git diff <snapshot tree>` with it compares the snapshot with the working files.
+ */
+async function nowIndex($: Engine, cwd: string) {
+  const env = await scratchIndex($, cwd, NOW_INDEX)
+  await resetIndex($, cwd, env)
+  const untracked = await listUntracked($, cwd, env)
+  if (untracked.length) check(await addPaths($, cwd, env, untracked, ['--intent-to-add']), 'git add')
+  return env
+}
+
+/** This session's store key for a checkout's snapshot. */
+async function snapshotKey($: Engine, cwd: string) {
   const { startedAt } = await $.session.usage()
-  return `${SNAPSHOT_REFS}/${startedAt}/${folderHash(cwd)}`
+  return `${SNAPSHOT_STORE}${startedAt}/${folderHash(cwd)}`
+}
+
+function isSnapshot(value: unknown): value is Snapshot {
+  const one = value as Snapshot | undefined
+  return typeof one?.tree === 'string' && typeof one.untracked === 'string' && one.tree !== ''
 }
 
 /**
  * The checkout's snapshot from this session's start, taking it now if there is
- * none (`isLate`: the checkout wasn't seen when the session started).
+ * none (`isLate`: the checkout wasn't seen when the session started, or git
+ * had cleaned the snapshot up).
  */
 async function baseline($: Engine, cwd: string, isAtStart = false) {
-  const ref = await snapshotRef($, cwd)
-  const found = await git($, cwd, ['rev-parse', '--verify', '--quiet', ref])
-  if (found.exitCode === 0) return { tree: found.stdout.trim(), isLate: false }
-  const tree = await writeTree($, cwd)
-  await git($, cwd, ['update-ref', ref, tree])
+  const key = await snapshotKey($, cwd)
+  const saved = await $.store.get(key)
+  if (isSnapshot(saved)) {
+    const ids = [saved.tree, saved.untracked].filter(Boolean)
+    if ((await heldObjects($, cwd, ids)).size === ids.length) return { snapshot: saved, isLate: false }
+  }
+  const snapshot = await takeSnapshot($, cwd)
+  await $.store.set(key, snapshot)
   await pruneSnapshots($, cwd)
-  return { tree, isLate: !isAtStart }
+  return { snapshot, isLate: !isAtStart }
 }
 
-/** Deletes this repo's snapshots from sessions that started more than SNAPSHOT_KEEP_MS ago. */
+/**
+ * Drops stored snapshots of sessions that started more than SNAPSHOT_KEEP_MS
+ * ago, and deletes this repo's refs from earlier versions, which kept their
+ * snapshots (untracked files' contents included) where a push could send them.
+ */
 async function pruneSnapshots($: Engine, cwd: string) {
   const now = await $.clock.now()
-  const refs = await git($, cwd, ['for-each-ref', '--format=%(refname)', SNAPSHOT_REFS])
-  for (const ref of refs.stdout.split('\n').filter(Boolean)) {
-    const startedAt = Number(ref.slice(SNAPSHOT_REFS.length + 1).split('/')[0])
-    if (startedAt && now - startedAt > SNAPSHOT_KEEP_MS) await git($, cwd, ['update-ref', '-d', ref])
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(SNAPSHOT_STORE)) continue
+    const startedAt = Number(key.slice(SNAPSHOT_STORE.length).split('/')[0])
+    if (startedAt && now - startedAt > SNAPSHOT_KEEP_MS) await $.store.delete(key)
   }
+  const refs = await git($, cwd, ['for-each-ref', '--format=%(refname)', LEGACY_REFS])
+  for (const ref of refs.stdout.split(/\r?\n/).filter(Boolean)) await git($, cwd, ['update-ref', '-d', ref])
 }
 
 /** Takes the session-start snapshot of every checkout in the folder that has none yet. */
