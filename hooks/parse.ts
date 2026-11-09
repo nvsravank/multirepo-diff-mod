@@ -238,9 +238,68 @@ export function parseWorktrees(out: string): Worktree[] {
     .filter((one): one is Worktree => one !== null)
 }
 
+// --- session snapshots ------------------------------------------------------
+
+/**
+ * The list of files that were untracked when a snapshot was taken, with the
+ * hash of each one's contents (the contents themselves aren't kept): entries
+ * of `<hash> <path>`, each ended by a NUL, sorted by path.
+ */
+export function formatHashList(hashes: ReadonlyMap<string, string>) {
+  return [...hashes]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([path, hash]) => `${hash} ${path}\0`)
+    .join('')
+}
+
+export function parseHashList(text: string): Map<string, string> {
+  const hashes = new Map<string, string>()
+  for (const entry of text.split('\0')) {
+    const space = entry.indexOf(' ')
+    if (space > 0) hashes.set(entry.slice(space + 1), entry.slice(0, space))
+  }
+  return hashes
+}
+
+/** Pairs `git hash-object --stdin-paths` output lines with the paths it was given. */
+export function pairHashes(paths: readonly string[], out: string): Map<string, string> {
+  const lines = out.split(/\r?\n/).filter(Boolean)
+  const hashes = new Map<string, string>()
+  if (lines.length === paths.length) paths.forEach((path, i) => hashes.set(path, lines[i]))
+  return hashes
+}
+
+/**
+ * Turns `git diff --name-status <snapshot tree>` into the session's changes.
+ *
+ * Files that were untracked at the start aren't in the snapshot tree (only
+ * their hashes are kept, in `atStart`), so the diff lists every one still
+ * around as added. Each is dropped when its hash now (`hashesNow`) matches,
+ * and otherwise shown as changed with no earlier version to compare. Ones in
+ * `gone` were deleted since, which the diff can't see at all.
+ */
+export function sessionChanges(
+  diffed: readonly FileChange[],
+  atStart: ReadonlyMap<string, string>,
+  hashesNow: ReadonlyMap<string, string>,
+  gone: Iterable<string>,
+): FileChange[] {
+  const list: FileChange[] = []
+  for (const one of diffed) {
+    const was = one.status.startsWith('A') && !one.from ? atStart.get(one.path) : undefined
+    if (was === undefined) list.push(one)
+    else if (hashesNow.get(one.path) !== was) list.push({ ...one, status: 'M ', isUnsaved: true })
+  }
+  const listed = new Set(list.map(one => one.path))
+  for (const path of gone) {
+    if (atStart.has(path) && !listed.has(path)) list.push({ status: 'D ', path, isUnsaved: true })
+  }
+  return list
+}
+
 /**
  * A short, stable name for a folder (8 hex characters, FNV-1a of the path as
- * samePath compares it), so each checkout of a repo gets its own snapshot ref.
+ * samePath compares it), so each checkout of a repo gets its own snapshot.
  */
 export function folderHash(path: string) {
   let hash = 0x811c9dc5

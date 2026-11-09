@@ -10,8 +10,13 @@ export type FileChange = {
   from?: string
   /** Two-letter status, e.g. ` M`, `A `, `??`. */
   status: string
-  /** Session mode: the snapshot tree from the session's start, and the tree of the files now. */
-  trees?: { base: string; now: string }
+  /** Session mode: the snapshot tree from the session's start, compared with the files now. */
+  base?: string
+  /**
+   * Session mode: the file was untracked when the session started, so the
+   * snapshot kept only its hash, not its contents, and there is no diff to show.
+   */
+  isUnsaved?: boolean
 }
 
 /**
@@ -20,7 +25,7 @@ export type FileChange = {
  * - unstaged: working tree against the staging area
  * - staged: staging area against the last commit
  * - base: the branch's commits against where it left the default branch (a PR's view)
- * - session: every change since this session started (by Claude or anyone), against a git snapshot taken then
+ * - session: every change since this session started (by Claude or anyone), against a snapshot taken then
  */
 export type DiffMode = 'head' | 'unstaged' | 'staged' | 'base' | 'session'
 

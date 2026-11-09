@@ -16,7 +16,50 @@ import {
   toTree,
   toView,
   untracked,
+  formatHashList,
+  pairHashes,
+  parseHashList,
+  sessionChanges,
 } from '../hooks/parse'
+
+describe('session snapshots', () => {
+  test('the untracked-file hash list round-trips, spaces in names included', () => {
+    const hashes = new Map([['notes.txt', 'b'.repeat(40)], ['data/my export.csv', 'a'.repeat(40)]])
+    const text = formatHashList(hashes)
+    expect(text).toBe(`${'a'.repeat(40)} data/my export.csv\0${'b'.repeat(40)} notes.txt\0`)
+    expect(parseHashList(text)).toEqual(hashes)
+    expect(parseHashList('')).toEqual(new Map())
+  })
+
+  test('hash-object output pairs with its paths, and a mismatch pairs nothing', () => {
+    expect(pairHashes(['a', 'b'], 'h1\nh2\n')).toEqual(new Map([['a', 'h1'], ['b', 'h2']]))
+    expect(pairHashes(['a', 'b'], 'h1\n')).toEqual(new Map())
+  })
+
+  test('untracked-at-start files: unchanged dropped, changed and deleted flagged', () => {
+    const diffed = [
+      { status: 'M ', path: 'src/app.ts' },
+      { status: 'A ', path: 'new.ts' },
+      { status: 'A ', path: '.env' },
+      { status: 'A ', path: 'notes.txt' },
+      { status: 'R ', path: 'moved.txt', from: 'old.txt' },
+    ]
+    const atStart = new Map([['.env', 'h-env'], ['notes.txt', 'h-old'], ['gone.csv', 'h-gone'], ['moved.txt', 'h-m']])
+    const now = new Map([['.env', 'h-env'], ['notes.txt', 'h-new']])
+    expect(sessionChanges(diffed, atStart, now, ['gone.csv', 'not-tracked-then.txt'])).toEqual([
+      { status: 'M ', path: 'src/app.ts' },
+      { status: 'A ', path: 'new.ts' },
+      { status: 'M ', path: 'notes.txt', isUnsaved: true },
+      { status: 'R ', path: 'moved.txt', from: 'old.txt' },
+      { status: 'D ', path: 'gone.csv', isUnsaved: true },
+    ])
+  })
+
+  test('an untracked file whose hash could not be taken shows as changed', () => {
+    const out = sessionChanges([{ status: 'A ', path: 'odd' }], new Map([['odd', 'h']]), new Map(), [])
+    expect(out).toEqual([{ status: 'M ', path: 'odd', isUnsaved: true }])
+  })
+})
 
 describe('git output', () => {
   test('status: modified, untracked, rename with its original path, spaces in names', () => {
